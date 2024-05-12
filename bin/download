@@ -8,13 +8,129 @@ plugin_dir=$(dirname "$(dirname "$current_script_path")")
 # shellcheck source=./lib/utils.bash
 source "${plugin_dir}/lib/utils.bash"
 
-mkdir -p "$ASDF_DOWNLOAD_PATH"
+declare -r GRON_REPO="https://github.com/tomnomnom/gron.git"
+declare -r RELEASES_URL="https://api.github.com/repos/tomnomnom/gron/releases"
+declare -r DOWNLOAD_BASE_URL="https://github.com/tomnomnom/gron/releases/download"
 
-# TODO: Adapt this to proper extension and adapt extracting strategy.
-release_file="$ASDF_DOWNLOAD_PATH/$TOOL_NAME-$ASDF_INSTALL_VERSION.tar.gz"
+error_exit() {
+  echo "$1" >&2
+  exit "${2:-1}"
+}
 
-# Download tar.gz file to the download directory
-download_release "$ASDF_INSTALL_VERSION" "$release_file"
+curl_wrapper() {
+  curl -A 'curl/1.0.0' -H 'Accept: application/json' "$@"
+}
+
+get_platform() {
+  local testStr="$(uname | tr '[:upper:]' '[:lower:]')"
+  if [ "$testStr" == "darwin" ]; then
+    echo "darwin"
+  else
+    echo "linux"
+  fi
+  return
+}
+
+get_arch(){
+  declare arch="$(uname -m)"
+  if [ "$arch" == 'x86_64' ]; then
+    echo 'i64'
+  elif [ "$arch" == 'aarch64' ]; then
+    echo 'arm64'
+  elif [ "$arch" == 'arm64' ]; then
+    echo 'arm64'
+  elif [ "$arch" == 'i386' ]; then
+    echo 'i32'
+  elif [ "$arch" == 'i686' ]; then
+    echo 'i32'
+  else
+    error_exit 'Sadly, there are no releases detected for your architecture'
+  fi
+  return
+}
+
+get_assets_url() {
+  declare install_version="$1"
+  declare releases_json="$(curl "${curl_opts[@]}" "$RELEASES_URL")"
+  declare -a asset_urls
+  asset_urls=($(echo "$releases_json" | sed -n -E 's/[[:blank:]]*"assets_url":[[:blank:]]*"([^"]*)".*/\1/p'))
+  declare -a tag_names
+  tag_names=($(echo "$releases_json"  | sed -n -E 's/[[:blank:]]*"tag_name":[[:blank:]]*"([^"]*)".*/\1/p'))
+  for i in "${!tag_names[@]}"; do
+    if [ "${tag_names[$i]}" == "$install_version" ]; then
+      echo "${asset_urls[$i]}"
+      return
+    fi
+  done
+  error_exit "Given version '$install_version' did not match any releases. Try list-all to see available options"
+}
+
+find_all_asset_names() {
+  declare install_version="$1"
+  declare assets_url="$(get_assets_url "$install_version")"
+  if [ -z "$assets_url" ]; then
+    error_exit "No URL found for release $install_version"
+  fi
+  declare assets_json="$(curl "${curl_opts[@]}" "$assets_url")"
+  declare -a output=($(echo "$assets_json" | sed -n -E 's/[[:blank:]]*"browser_download_url":[[:blank:]]{0,2}"([^"]{8,})"/\1/p'))
+  echo "${output[@]}"
+}
+
+filter_assets() {
+  declare -a inArr=($@)
+  declare platform="$(get_platform)";
+  declare arch="$(get_arch)"
+  declare -a filteredArr=()
+
+  for i in "${inArr[@]}"; do
+    if [ "$arch" == "i32" ]; then
+      declare filteredUrl="$(echo "$i" | sed -n -E "/.*$platform.*(86|32)/p" | sed -n -E '/.*86_64.*/!p')"
+      declare canPass="$(echo "$filteredUrl" | sed -n -E 's/.*[[:alpha:]].*/true/p')"
+      if [ "$canPass" == "true" ]; then
+        filteredArr+=("$filteredUrl")
+      fi
+    elif [ "$arch" == "i64" ]; then
+      declare filteredUrl="$(echo "$i" | sed -n -E "/$platform.*(amd64)/p")"
+      declare canPass="$(echo "$filteredUrl" | sed -n -E 's/.*[[:alpha:]].*/true/p')"
+      if [ "$canPass" == "true" ]; then
+        filteredArr+=("$filteredUrl")
+      fi
+    elif [ "$arch" == "arm64" ]; then
+      declare filteredUrl="$(echo "$i" | sed -n -E "/$platform.*(arm64)/p")"
+      declare canPass="$(echo "$filteredUrl" | sed -n -E 's/.*[[:alpha:]].*/true/p')"
+      if [ "$canPass" == "true" ]; then
+        filteredArr+=("$filteredUrl")
+      fi
+    else
+      error_exit 'Could not determine package to pull matching with your platform and architecture'
+    fi
+  done
+  echo "${filteredArr[@]}"
+}
+
+find_file_url() {
+  declare -r install_version="$@"
+
+  declare -r arch="$(get_arch)"
+  declare -r platform="$(get_platform)"
+  declare -a assets=($(find_all_asset_names "$install_version"))
+  declare -a usableAssets=( "$(filter_assets "${assets[@]}")" )
+
+  if [ "${#usableAssets[@]}" == 0 ]; then
+    error_exit "No releases in version $install_version matching $platform $arch-bits"
+  elif [ "${#usableAssets[@]}" -gt 1  ]; then
+    echo "Multiple releases found matching $platform $arch-bits, choosing first" >&2
+  fi
+
+  echo "${usableAssets[0]}"
+}
+
+
+declare -r release_file="$ASDF_DOWNLOAD_PATH/$TOOL_NAME-$ASDF_INSTALL_VERSION.tar.gz"
+
+declare -r download_url=$(find_file_url "$ASDF_INSTALL_VERSION")
+
+download_release "$ASDF_INSTALL_VERSION" "$release_file" "$download_url"
 
 #  Extract contents of tar.gz file into the download directory
 tar -xzf "$release_file" -C "$ASDF_DOWNLOAD_PATH" --strip-components=1 || fail "Could not extract $release_file"
