@@ -55,7 +55,7 @@ install_version() {
 
 	(
 		mkdir -p "$install_path"
-		cp -r "$ASDF_DOWNLOAD_PATH"/* "$install_path"
+		cp -r "${ASDF_DOWNLOAD_PATH}/gron" "$install_path"
 
 		# TODO: Assert gron executable exists.
 		local tool_cmd
